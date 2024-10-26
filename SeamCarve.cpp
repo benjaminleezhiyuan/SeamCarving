@@ -1,243 +1,304 @@
-#include <opencv2/opencv.hpp>  // Include OpenCV header
 #include <iostream>
-#include <vector>
-#include <algorithm>
-#include <cmath>
+#include <opencv2/opencv.hpp>
+
+using namespace cv;
+using namespace std;
+
+// Function to compute the energy map of the image
+Mat computeEnergyMap(const Mat& image) {
+    Mat gray, grad_x, grad_y, abs_grad_x, abs_grad_y, energy_map;
+
+    // Convert to grayscale
+    cvtColor(image, gray, COLOR_BGR2GRAY);
+
+    // Compute gradients along X and Y directions
+    Sobel(gray, grad_x, CV_16S, 1, 0, 3);
+    Sobel(gray, grad_y, CV_16S, 0, 1, 3);
+
+    // Convert gradients to absolute values
+    convertScaleAbs(grad_x, abs_grad_x);
+    convertScaleAbs(grad_y, abs_grad_y);
+
+    // Compute the energy map as the sum of absolute gradients
+    addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0, energy_map);
+
+    return energy_map;
+}
+
+// Function to find and remove a vertical seam using dynamic programming
+void removeVerticalSeamDP(Mat& image) {
+    Mat energy_map = computeEnergyMap(image);
+    int rows = energy_map.rows;
+    int cols = energy_map.cols;
+
+    // Initialize the cumulative energy map
+    Mat M = Mat::zeros(rows, cols, CV_32S);
+    energy_map.row(0).convertTo(M.row(0), CV_32S);
+
+    // Compute the cumulative energy map
+    for (int i = 1; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            int min_energy = M.at<int>(i - 1, j);
+            if (j > 0)
+                min_energy = min(min_energy, M.at<int>(i - 1, j - 1));
+            if (j < cols - 1)
+                min_energy = min(min_energy, M.at<int>(i - 1, j + 1));
+            M.at<int>(i, j) = energy_map.at<uchar>(i, j) + min_energy;
+        }
+    }
+
+    // Backtrack to find the seam path
+    vector<int> seam(rows);
+    int min_idx = 0;
+    int min_val = M.at<int>(rows - 1, 0);
+    for (int j = 1; j < cols; j++) {
+        if (M.at<int>(rows - 1, j) < min_val) {
+            min_val = M.at<int>(rows - 1, j);
+            min_idx = j;
+        }
+    }
+    seam[rows - 1] = min_idx;
+
+    for (int i = rows - 2; i >= 0; i--) {
+        int prev_x = seam[i + 1];
+        int min_energy = M.at<int>(i, prev_x);
+        min_idx = prev_x;
+
+        if (prev_x > 0 && M.at<int>(i, prev_x - 1) < min_energy) {
+            min_energy = M.at<int>(i, prev_x - 1);
+            min_idx = prev_x - 1;
+        }
+        if (prev_x < cols - 1 && M.at<int>(i, prev_x + 1) < min_energy) {
+            min_energy = M.at<int>(i, prev_x + 1);
+            min_idx = prev_x + 1;
+        }
+        seam[i] = min_idx;
+    }
+
+    // Remove the seam from the image
+    Mat output(rows, cols - 1, CV_8UC3);
+    for (int i = 0; i < rows; i++) {
+        int idx = seam[i];
+        for (int j = 0; j < idx; j++) {
+            output.at<Vec3b>(i, j) = image.at<Vec3b>(i, j);
+        }
+        for (int j = idx + 1; j < cols; j++) {
+            output.at<Vec3b>(i, j - 1) = image.at<Vec3b>(i, j);
+        }
+    }
+    image = output.clone();
+}
+
+// Function to find and remove a horizontal seam using dynamic programming
+void removeHorizontalSeamDP(Mat& image) {
+    // Transpose the image to reuse the vertical seam function
+    Mat transposed_image;
+    transpose(image, transposed_image);
+    flip(transposed_image, transposed_image, 0);
+
+    removeVerticalSeamDP(transposed_image);
+
+    // Transpose back to get the image with the horizontal seam removed
+    flip(transposed_image, transposed_image, 0);
+    transpose(transposed_image, image);
+}
+
+// Function to find and remove a vertical seam using a greedy algorithm
+void removeVerticalSeamGreedy(Mat& image) {
+    Mat energy_map = computeEnergyMap(image);
+    int rows = energy_map.rows;
+    int cols = energy_map.cols;
+
+    // Initialize seam path
+    vector<int> seam(rows);
+
+    // Start from the top row
+    double min_val;
+    Point min_loc;
+    minMaxLoc(energy_map.row(0), &min_val, nullptr, &min_loc, nullptr);
+    seam[0] = min_loc.x;
+
+    // Greedy approach to find the seam
+    for (int i = 1; i < rows; i++) {
+        int prev_x = seam[i - 1];
+        int min_energy = energy_map.at<uchar>(i, prev_x);
+        int min_idx = prev_x;
+
+        if (prev_x > 0 && energy_map.at<uchar>(i, prev_x - 1) < min_energy) {
+            min_energy = energy_map.at<uchar>(i, prev_x - 1);
+            min_idx = prev_x - 1;
+        }
+        if (prev_x < cols - 1 && energy_map.at<uchar>(i, prev_x + 1) < min_energy) {
+            min_energy = energy_map.at<uchar>(i, prev_x + 1);
+            min_idx = prev_x + 1;
+        }
+        seam[i] = min_idx;
+    }
+
+    // Remove the seam from the image
+    Mat output(rows, cols - 1, CV_8UC3);
+    for (int i = 0; i < rows; i++) {
+        int idx = seam[i];
+        for (int j = 0; j < idx; j++) {
+            output.at<Vec3b>(i, j) = image.at<Vec3b>(i, j);
+        }
+        for (int j = idx + 1; j < cols; j++) {
+            output.at<Vec3b>(i, j - 1) = image.at<Vec3b>(i, j);
+        }
+    }
+    image = output.clone();
+}
+
+// Function to find and remove a horizontal seam using a greedy algorithm
+void removeHorizontalSeamGreedy(Mat& image) {
+    // Transpose the image to reuse the vertical seam function
+    Mat transposed_image;
+    transpose(image, transposed_image);
+    flip(transposed_image, transposed_image, 0);
+
+    removeVerticalSeamGreedy(transposed_image);
+
+    // Transpose back to get the image with the horizontal seam removed
+    flip(transposed_image, transposed_image, 0);
+    transpose(transposed_image, image);
+}
+
+#include <iostream>
 #include <sstream>
+#include <opencv2/opencv.hpp>
 
 using namespace std;
-using namespace cv;  // OpenCV namespace
-
-// Calculate the energy map using the gradient magnitude
-vector<vector<int>> calculateEnergyMap(unsigned char* image, int width, int height, int channels) {
-    vector<vector<int>> energyMap(height, vector<int>(width, 0));
-
-    for (int y = 1; y < height - 1; ++y) {
-        for (int x = 1; x < width - 1; ++x) {
-            int offset = (y * width + x) * channels;
-
-            int dxR = image[offset + channels] - image[offset - channels];
-            int dyR = image[offset + width * channels] - image[offset - width * channels];
-            int dxG = image[offset + channels + 1] - image[offset - channels + 1];
-            int dyG = image[offset + width * channels + 1] - image[offset - width * channels + 1];
-            int dxB = image[offset + channels + 2] - image[offset - channels + 2];
-            int dyB = image[offset + width * channels + 2] - image[offset - width * channels + 2];
-
-            int energy = sqrt(dxR * dxR + dyR * dyR + dxG * dxG + dyG * dyG + dxB * dxB + dyB * dyB);
-            energyMap[y][x] = energy;
-        }
-    }
-
-    return energyMap;
-}
-
-// Find the optimal vertical seam using dynamic programming
-vector<int> findVerticalSeam(const vector<vector<int>>& energyMap) {
-    int height = energyMap.size();
-    int width = energyMap[0].size();
-
-    vector<vector<int>> seamEnergy = energyMap;
-    vector<int> seam(height);
-
-    for (int y = 1; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int minEnergy = seamEnergy[y - 1][x];
-            if (x > 0) minEnergy = min(minEnergy, seamEnergy[y - 1][x - 1]);
-            if (x < width - 1) minEnergy = min(minEnergy, seamEnergy[y - 1][x + 1]);
-
-            seamEnergy[y][x] += minEnergy;
-        }
-    }
-
-    int minSeamEnd = min_element(seamEnergy[height - 1].begin(), seamEnergy[height - 1].end()) - seamEnergy[height - 1].begin();
-    seam[height - 1] = minSeamEnd;
-
-    for (int y = height - 2; y >= 0; --y) {
-        int x = seam[y + 1];
-        int minX = x;
-
-        if (x > 0 && seamEnergy[y][x - 1] < seamEnergy[y][minX]) minX = x - 1;
-        if (x < width - 1 && seamEnergy[y][x + 1] < seamEnergy[y][minX]) minX = x + 1;
-
-        seam[y] = minX;
-    }
-
-    return seam;
-}
-
-// Find the vertical seam using a greedy approach (selects local minimum energy per row)
-vector<int> findVerticalSeamGreedy(const vector<vector<int>>& energyMap) {
-    int height = energyMap.size();
-    int width = energyMap[0].size();
-    vector<int> seam(height);
-
-    // Start from the minimum energy position in the top row
-    seam[0] = min_element(energyMap[0].begin(), energyMap[0].end()) - energyMap[0].begin();
-
-    for (int y = 1; y < height; ++y) {
-        int x = seam[y - 1];
-        int minX = x;
-
-        // Look at the current row and pick the local minimum from three possible positions
-        if (x > 0 && energyMap[y][x - 1] < energyMap[y][minX]) minX = x - 1;
-        if (x < width - 1 && energyMap[y][x + 1] < energyMap[y][minX]) minX = x + 1;
-
-        seam[y] = minX;
-    }
-
-    return seam;
-}
-
-// Remove the seam from the image
-void removeVerticalSeam(unsigned char*& image, int& width, int height, int channels, const vector<int>& seam) {
-    unsigned char* newImage = new unsigned char[width * height * channels - height * channels];
-
-    for (int y = 0; y < height; ++y) {
-        int newIndex = y * (width - 1) * channels;
-        int oldIndex = y * width * channels;
-
-        for (int x = 0; x < width; ++x) {
-            if (x != seam[y]) {
-                for (int c = 0; c < channels; ++c) {
-                    newImage[newIndex++] = image[oldIndex + x * channels + c];
-                }
-            }
-        }
-    }
-
-    delete[] image;
-    image = newImage;
-    --width;
-}
-
-// Helper function to transpose the image matrix
-void transposeImage(unsigned char*& image, int& width, int& height, int channels) {
-    unsigned char* transposedImage = new unsigned char[width * height * channels];
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            for (int c = 0; c < channels; ++c) {
-                transposedImage[(x * height + y) * channels + c] = image[(y * width + x) * channels + c];
-            }
-        }
-    }
-    swap(width, height);
-    delete[] image;
-    image = transposedImage;
-}
-
-// Display the image using OpenCV
-void displayImage(const unsigned char* image, int width, int height, int channels, const string& windowName) {
-    Mat mat(height, width, channels == 3 ? CV_8UC3 : CV_8UC1, (void*)image);
-    namedWindow(windowName, WINDOW_AUTOSIZE);
-    imshow(windowName, mat);
-    waitKey(0);  // Display briefly and return control to the console
-}
+using namespace cv;
 
 int main() {
     string filename;
-    cout << "Enter the base name of the image (e.g., 'surfer'): ";
-    cin >> filename;
-    filename += ".png";  // Append .png to the filename
+    Mat original_image;
 
-    // Load the image using OpenCV
-    Mat img = imread(filename, IMREAD_COLOR);
-    if (img.empty()) {
-        cout << "Failed to load image" << endl;
-        return -1;
+    // Loop to ensure a valid image file is loaded
+    while (true) {
+        cout << "Enter the image name (without extension): ";
+        cin >> filename;
+        cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Clear the newline character
+
+        // Append .png to the filename
+        filename += ".png";
+
+        // Load the image
+        original_image = imread(filename);
+        if (!original_image.empty()) {
+            break; // Exit the loop if a valid image is loaded
+        }
+
+        // If loading fails, display an error and prompt again
+        cout << "Could not open or find the image! Please try again." << endl;
     }
 
-    int width = img.cols;
-    int height = img.rows;
-    int channels = img.channels();
-    unsigned char* image = img.data;
-
-    // Display the original image briefly
-    displayImage(image, width, height, channels, "Original Image");
+    // Store the original image dimensions
+    int original_width = original_image.cols;
+    int original_height = original_image.rows;
+    cout << "Original image dimensions: " << original_width << " x " << original_height << endl;
 
     while (true) {
+        int new_width = -1, new_height = -1;
+        cout << "Enter the desired new width and height (e.g., 500 500), 'new' to load a new image, or '-1' to exit: ";
         string input;
-        int targetWidth, targetHeight;
+        getline(cin, input);
 
-        while (true) {
-            cout << "Enter the target width and height (less than " << width << " " << height << "), or type '-1' to exit: ";
-            getline(cin >> ws, input);
+        if (input == "-1") {
+            break; // Exit the loop if -1 is entered
+        }
+        else if (input == "new") {
+            // Inner loop to load a new image if the user enters "new"
+            while (true) {
+                cout << "Enter the new image name (without extension): ";
+                cin >> filename;
+                cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Clear the newline character
 
-            if (input == "-1") return 0;  // Exit condition
+                // Append .png to the filename
+                filename += ".png";
 
-            istringstream iss(input);
-            if (iss >> targetWidth >> targetHeight && targetWidth < width && targetHeight < height) {
-                break;  // Valid input, break out of the inner loop
+                // Load the new image
+                original_image = imread(filename);
+                if (!original_image.empty()) {
+                    break; // Exit the loop if a valid image is loaded
+                }
+
+                // If loading fails, display an error and prompt again
+                cout << "Could not open or find the image! Please try again." << endl;
             }
-            else {
-                cout << "Invalid input. Please enter two integers less than " << width << " and " << height << "." << endl;
-            }
+
+            // Update the original image dimensions
+            original_width = original_image.cols;
+            original_height = original_image.rows;
+            cout << "Original image dimensions: " << original_width << " x " << original_height << endl;
+            continue; // Go back to the beginning of the loop
         }
 
-        // Resize using dynamic programming
-        int dpWidth = width, dpHeight = height;
-        unsigned char* dpImage = new unsigned char[dpWidth * dpHeight * channels];
-        memcpy(dpImage, image, dpWidth * dpHeight * channels);
-
-        // Reduce width using dynamic programming
-        while (dpWidth > targetWidth) {
-            auto energyMap = calculateEnergyMap(dpImage, dpWidth, dpHeight, channels);
-            auto seam = findVerticalSeam(energyMap);  // Dynamic programming
-            removeVerticalSeam(dpImage, dpWidth, dpHeight, channels, seam);
+        // Use a stringstream to parse the input
+        stringstream ss(input);
+        int width, height;
+        if (!(ss >> width >> height) || (ss >> ws, !ss.eof())) {
+            cout << "Invalid input. Please enter exactly two integer values for width and height." << endl;
+            continue; // Prompt again if input is invalid
         }
 
-        // Reduce height by transposing for vertical seam removal
-        if (dpHeight > targetHeight) {
-            transposeImage(dpImage, dpWidth, dpHeight, channels);  // Transpose for seam removal along new "width"
-            while (dpWidth > targetHeight) {
-                auto energyMap = calculateEnergyMap(dpImage, dpWidth, dpHeight, channels);
-                auto seam = findVerticalSeam(energyMap);  // Dynamic programming
-                removeVerticalSeam(dpImage, dpWidth, dpHeight, channels, seam);
-            }
-            transposeImage(dpImage, dpWidth, dpHeight, channels);  // Transpose back to original orientation
+        // Check that the dimensions are within bounds
+        if (width <= 0 || width > original_width || height <= 0 || height > original_height) {
+            cout << "Invalid dimensions. Width and height must be positive and within "
+                << original_width << " x " << original_height << "." << endl;
+            continue; // Prompt again if dimensions are out of bounds
         }
 
-        // Resize using greedy approach
-        int greedyWidth = width, greedyHeight = height;
-        unsigned char* greedyImage = new unsigned char[greedyWidth * greedyHeight * channels];
-        memcpy(greedyImage, image, greedyWidth * greedyHeight * channels);
+        // Set the validated dimensions
+        new_width = width;
+        new_height = height;
 
-        // Reduce width using greedy approach
-        while (greedyWidth > targetWidth) {
-            auto energyMap = calculateEnergyMap(greedyImage, greedyWidth, greedyHeight, channels);
-            auto seam = findVerticalSeamGreedy(energyMap);  // Greedy approach
-            removeVerticalSeam(greedyImage, greedyWidth, greedyHeight, channels, seam);
+        int num_vertical_seams = original_width - new_width;
+        int num_horizontal_seams = original_height - new_height;
+
+        if (num_vertical_seams < 0 || num_horizontal_seams < 0) {
+            cout << "New dimensions must be smaller than or equal to the original dimensions." << endl;
+            continue;
         }
 
-        // Reduce height using greedy approach
-        if (greedyHeight > targetHeight) {
-            transposeImage(greedyImage, greedyWidth, greedyHeight, channels);  // Transpose for seam removal along new "width"
-            while (greedyWidth > targetHeight) {
-                auto energyMap = calculateEnergyMap(greedyImage, greedyWidth, greedyHeight, channels);
-                auto seam = findVerticalSeamGreedy(energyMap);  // Greedy approach
-                removeVerticalSeam(greedyImage, greedyWidth, greedyHeight, channels, seam);
-            }
-            transposeImage(greedyImage, greedyWidth, greedyHeight, channels);  // Transpose back to original orientation
+        Mat image_dp = original_image.clone();
+        Mat image_greedy = original_image.clone();
+
+        for (int i = 0; i < num_vertical_seams; i++) {
+            removeVerticalSeamDP(image_dp);
+        }
+        for (int i = 0; i < num_horizontal_seams; i++) {
+            removeHorizontalSeamDP(image_dp);
         }
 
-        // Display the resized images
-        displayImage(dpImage, dpWidth, dpHeight, channels, "Dynamic Programming Resized Image");
-        displayImage(greedyImage, greedyWidth, greedyHeight, channels, "Greedy Resized Image");
+        for (int i = 0; i < num_vertical_seams; i++) {
+            removeVerticalSeamGreedy(image_greedy);
+        }
+        for (int i = 0; i < num_horizontal_seams; i++) {
+            removeHorizontalSeamGreedy(image_greedy);
+        }
 
-        // Save both resized images
-        Mat dpMat(dpHeight, dpWidth, channels == 3 ? CV_8UC3 : CV_8UC1, dpImage);
-        Mat greedyMat(greedyHeight, greedyWidth, channels == 3 ? CV_8UC3 : CV_8UC1, greedyImage);
-        imwrite("dp_resized.png", dpMat);
-        imwrite("greedy_resized.png", greedyMat);
-        cout << "Dynamic programming resized image saved as dp_resized.png" << endl;
-        cout << "Greedy resized image saved as greedy_resized.png" << endl;
+        stringstream ss_filename_dp, ss_filename_greedy;
+        ss_filename_dp << "output_dp_" << new_width << "x" << new_height << ".png";
+        ss_filename_greedy << "output_greedy_" << new_width << "x" << new_height << ".png";
 
-        // Free memory
-        delete[] dpImage;
-        delete[] greedyImage;
+        // Save the results with fixed filenames
+        imwrite("output_dp.png", image_dp);
+        imwrite("output_greedy.png", image_greedy);
+
+        namedWindow("Original Image", WINDOW_AUTOSIZE);
+        imshow("Original Image", original_image);
+
+        namedWindow("Dynamic Programming Result", WINDOW_AUTOSIZE);
+        imshow("Dynamic Programming Result", image_dp);
+
+        namedWindow("Greedy Algorithm Result", WINDOW_AUTOSIZE);
+        imshow("Greedy Algorithm Result", image_greedy);
+
+        waitKey(0);
+        destroyAllWindows(); // Close the image windows before the next iteration
     }
 
-    cout << "Program terminated." << endl;
     return 0;
 }
-
 
