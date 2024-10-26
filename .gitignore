@@ -399,3 +399,5 @@ FodyWeavers.xsd
 
 *.lib
 *.dll
+dp_resized.png
+greedy_resized.png
